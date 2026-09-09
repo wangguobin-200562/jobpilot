@@ -1,0 +1,15 @@
+# Install JobPilot in editable mode with its runtime dependencies.
+-e .
+
+# Test runner used throughout development.
+pytest>=8.3,<9.0
+
+# Local resume parsing.
+PyMuPDF>=1.26,<2.0
+python-docx>=1.2,<2.0
+
+# OpenAI-compatible DeepSeek client.
+openai>=2.0,<3.0
+
+# Explicit browser-adapter smoke tests and user-driven discovery.
+playwright>=1.50,<2.0

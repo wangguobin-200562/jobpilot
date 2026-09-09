@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "JobPilot",
+  "version": "0.2.5",
+  "description": "读取用户主动打开的 BOSS 岗位，并对用户明确确认的岗位发起初始沟通。",
+  "permissions": ["activeTab", "storage", "tabs", "alarms", "scripting"],
+  "host_permissions": [
+    "https://www.zhipin.com/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "JobPilot",
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.zhipin.com/*"],
+      "js": ["content.js", "boss_apply.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
