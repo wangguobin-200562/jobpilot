@@ -20,6 +20,7 @@ STATUS_LABELS = {
     ApplyExecutionStatus.SKIPPED: "已跳过",
     ApplyExecutionStatus.FAILED: "失败",
     ApplyExecutionStatus.PAUSED: "已安全暂停",
+    ApplyExecutionStatus.CANCELLED: "已取消",
     ApplyExecutionStatus.APPLIED: "已提交申请",
 }
 
@@ -55,12 +56,15 @@ def publish_confirmed_plan(plan, *, repository_factory, bridge_factory) -> bool:
                 "浏览器扩展尚未连接 JobPilot，请先恢复扩展连接。"
             )
         execution = BatchApplyExecutionService(repository).prepare_execution(plan)
-        bridge.apply_channel.publish(execution)
+        published = bridge.apply_channel.publish(execution)
+        if not published:
+            execution = bridge.apply_channel.snapshot() or execution
     except (ApplicationRepositoryError, ExtensionBridgeError, ApplyChannelError, ValueError) as exc:
         st.session_state.batch_apply_publish_error = str(exc)
         return False
     st.session_state.batch_apply_execution = execution
-    st.session_state.batch_apply_synced_task_ids = set()
+    if published:
+        st.session_state.batch_apply_synced_task_ids = set()
     st.session_state.batch_apply_start_requested = False
     st.session_state.batch_apply_publish_error = None
     return True
@@ -92,9 +96,14 @@ def _render_execution_body(execution: BatchApplyExecution, bridge) -> None:
             st.caption(item.message)
             if item.status in {ApplyExecutionStatus.MANUAL_REQUIRED, ApplyExecutionStatus.PAUSED}:
                 st.warning("该岗位需要人工确认；扩展不会绕过验证或额外表单。")
-                if st.button("跳过该岗位", key=f"manual_skip_{item.task_id}"):
-                    bridge.apply_channel.resolve_manual(item.task_id, completed=False)
-                    st.rerun()
+                with st.container(horizontal=True, gap="small"):
+                    st.link_button("打开处理", item.source_url, icon=":material/open_in_new:")
+                    if st.button("继续任务", key=f"manual_resume_{item.task_id}"):
+                        bridge.apply_channel.resume_manual(item.task_id)
+                        st.rerun()
+                    if st.button("跳过该岗位", key=f"manual_skip_{item.task_id}"):
+                        bridge.apply_channel.resolve_manual(item.task_id, completed=False)
+                        st.rerun()
     counts = Counter(item.status for item in execution.items)
     with st.container(horizontal=True, wrap=True):
         st.metric("成功沟通", counts[ApplyExecutionStatus.CONTACTED], border=True)
@@ -156,6 +165,11 @@ def render_batch_apply_execution(plan: BatchApplyPlan, *, repository_factory=App
         st.write(f"Pending：{diagnostics.pending_count}")
         st.write(f"Processing：{diagnostics.processing_count}")
         st.write(f"Completed：{diagnostics.completed_count}")
+        st.write(f"Batch ID：{diagnostics.screening_batch_id or '—'}")
+        st.write(f"Plan ID：{diagnostics.contact_plan_id or '—'}")
+        st.write(f"Worker Tab：{diagnostics.worker_tab_id if diagnostics.worker_tab_id is not None else '—'}")
+        heartbeat_age = diagnostics.heartbeat_age_seconds
+        st.write(f"Heartbeat Age：{heartbeat_age:.1f}s" if heartbeat_age is not None else "Heartbeat Age：—")
     if execution.finished_at is None:
         _auto_progress(bridge, repository_factory, current_batch_id)
         if st.button("停止本次沟通", key="cancel_batch_apply_execution", icon=":material/stop_circle:"):

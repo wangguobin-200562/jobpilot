@@ -76,14 +76,14 @@ def _execution(count=2):
     )
 
 
-def test_only_selected_jobs_are_prepared_and_maximum_is_ten() -> None:
+def test_only_selected_jobs_are_prepared_up_to_twenty() -> None:
     plan = _plan(12)
     plan.items[1] = plan.items[1].model_copy(update={"selected": False})
     plan.selected_count = 11
 
     execution = BatchApplyExecutionService(Repository()).prepare_execution(plan)
 
-    assert len(execution.items) == 10
+    assert len(execution.items) == 11
     assert all(item.job_title != "虚构岗位2" for item in execution.items)
 
 
@@ -160,17 +160,18 @@ def test_uncertain_contact_result_can_reconcile_to_contacted(uncertain_status) -
     assert channel.snapshot().finished_at is not None
 
 
-def test_new_screening_batch_replaces_old_execution_but_keeps_history() -> None:
+def test_new_screening_batch_cannot_replace_active_execution() -> None:
     channel = ApplyTaskChannel()
     first = _execution(1).model_copy(update={"screening_batch_id": "screening-first"})
     second = _execution(1).model_copy(
         update={"execution_id": "execution-second", "screening_batch_id": "screening-second"}
     )
     channel.publish(first)
-    channel.publish(second)
+    with pytest.raises(Exception, match="已有沟通任务"):
+        channel.publish(second)
 
-    assert channel.snapshot().execution_id == "execution-second"
-    assert [item.execution_id for item in channel.history()] == ["execution-test"]
+    assert channel.snapshot().execution_id == "execution-test"
+    assert channel.history() == []
 
 
 def test_same_active_screening_batch_cannot_publish_twice() -> None:
@@ -364,7 +365,7 @@ def test_cancel_stops_all_remaining_tasks() -> None:
     assert snapshot.cancelled is True
     assert snapshot.items[0].status is ApplyExecutionStatus.PAUSED
     assert all(
-        item.status is ApplyExecutionStatus.SKIPPED for item in snapshot.items[1:]
+        item.status is ApplyExecutionStatus.CANCELLED for item in snapshot.items[1:]
     )
     assert channel.next_task() == ("cancelled", None)
 
@@ -377,7 +378,8 @@ def test_apply_task_payload_has_no_jd_resume_or_pii() -> None:
     serialized = str(payload).casefold()
 
     assert set(payload) == {
-        "task_id", "application_id", "company", "job_title", "source_url", "action"
+        "task_id", "application_id", "company", "job_title", "source_url", "action",
+        "attempt", "lease_expires_at", "reconciliation_required",
     }
     assert all(term not in serialized for term in ("jd", "resume", "phone", "email"))
     assert payload["action"] == "initiate_contact"

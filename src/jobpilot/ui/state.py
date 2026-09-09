@@ -60,6 +60,8 @@ def initialize_session_state() -> None:
     st.session_state.setdefault("screened_discovery_keys", set())
     st.session_state.setdefault("boss_inbox_revision_seen", -1)
     st.session_state.setdefault("extension_bridge_started", False)
+    st.session_state.setdefault("screening_request_key", None)
+    st.session_state.setdefault("screening_in_progress", False)
 
 
 def _clear_optimization_state(state: dict) -> None:
@@ -300,6 +302,8 @@ def sync_batch_input_state(raw_input: str) -> str | None:
         st.session_state.batch_screening_mode_used = None
         clear_batch_apply_state(st.session_state)
         st.session_state.current_screening_batch_id = None
+        st.session_state.screening_request_key = None
+        st.session_state.screening_in_progress = False
     return fingerprint
 
 

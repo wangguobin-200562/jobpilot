@@ -11,6 +11,7 @@ from jobpilot.models import ApplicationStatus, JobApplication, ScreeningTier
 from jobpilot.models.batch_apply import ApplyReadiness, BatchApplyItem, BatchApplyPlan
 from jobpilot.models.fast_screening import FastScreeningItem, FastScreeningPipelineResult
 from jobpilot.storage import ApplicationRepositoryError, jd_text_fingerprint
+from jobpilot.browser.job_identity import canonical_job_key, canonicalize_job_url
 
 
 EXCLUDED_APPLICATION_STATUSES = frozenset(
@@ -95,9 +96,7 @@ def screening_result_fingerprint(result: FastScreeningPipelineResult) -> str:
 
 
 def apply_item_identity(item: BatchApplyItem) -> str:
-    if item.source_url:
-        return f"url:{item.source_url.strip().casefold()}"
-    return f"name:{item.company.strip().casefold()}|{item.job_title.strip().casefold()}"
+    return canonical_job_key(item.source_url, item.company, item.job_title)
 
 
 class BatchApplyService:
@@ -114,11 +113,11 @@ class BatchApplyService:
     def _existing_match(
         item: FastScreeningItem, applications: Sequence[JobApplication]
     ) -> JobApplication | None:
-        url = (item.job_input.source_url or "").strip().casefold()
+        url = canonicalize_job_url(item.job_input.source_url)
         company = (item.job_input.company or "未提供公司").strip().casefold()
         title = (item.job_input.job_title or "未命名岗位").strip().casefold()
         for application in applications:
-            if url and (application.source_url or "").strip().casefold() == url:
+            if url and canonicalize_job_url(application.source_url) == url:
                 return application
             if (
                 application.company.strip().casefold() == company
@@ -199,7 +198,14 @@ class BatchApplyService:
                 and item.exclusion_reason is None
             )
             planned.append(item.model_copy(update={"selected": requested and selectable}))
+        digest = sha256()
+        digest.update((screening_batch_id or "no-batch").encode("utf-8"))
+        for item in planned:
+            digest.update(b"\0")
+            digest.update(apply_item_identity(item).encode("utf-8"))
+            digest.update(b"\1" if item.selected else b"\0")
         return BatchApplyPlan(
+            contact_plan_id=f"contact-plan-{digest.hexdigest()}",
             screening_batch_id=screening_batch_id,
             items=planned,
             selected_count=sum(item.selected for item in planned),

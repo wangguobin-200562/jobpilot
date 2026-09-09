@@ -26,6 +26,7 @@ class ApplyExecutionStatus(str, Enum):
     SKIPPED = "skipped"
     FAILED = "failed"
     PAUSED = "paused"
+    CANCELLED = "cancelled"
 
 
 class ApplyAction(str, Enum):
@@ -40,8 +41,50 @@ TERMINAL_APPLY_STATUSES = frozenset(
         ApplyExecutionStatus.ALREADY_CONTACTED,
         ApplyExecutionStatus.SKIPPED,
         ApplyExecutionStatus.FAILED,
+        ApplyExecutionStatus.CANCELLED,
     }
 )
+
+LEGAL_APPLY_TRANSITIONS = {
+    ApplyExecutionStatus.PENDING: frozenset(
+        {ApplyExecutionStatus.PROCESSING, ApplyExecutionStatus.CANCELLED}
+    ),
+    ApplyExecutionStatus.PROCESSING: frozenset(
+        {
+            ApplyExecutionStatus.CONTACTED,
+            ApplyExecutionStatus.ALREADY_CONTACTED,
+            ApplyExecutionStatus.MANUAL_REQUIRED,
+            ApplyExecutionStatus.SKIPPED,
+            ApplyExecutionStatus.FAILED,
+            ApplyExecutionStatus.PAUSED,
+        }
+    ),
+    ApplyExecutionStatus.PAUSED: frozenset(
+        {
+            ApplyExecutionStatus.PENDING,
+            ApplyExecutionStatus.CONTACTED,
+            ApplyExecutionStatus.ALREADY_CONTACTED,
+            ApplyExecutionStatus.SKIPPED,
+        }
+    ),
+    ApplyExecutionStatus.MANUAL_REQUIRED: frozenset(
+        {
+            ApplyExecutionStatus.PENDING,
+            ApplyExecutionStatus.CONTACTED,
+            ApplyExecutionStatus.ALREADY_CONTACTED,
+            ApplyExecutionStatus.SKIPPED,
+        }
+    ),
+    ApplyExecutionStatus.FAILED: frozenset(
+        {ApplyExecutionStatus.CONTACTED, ApplyExecutionStatus.ALREADY_CONTACTED}
+    ),
+}
+
+
+def is_legal_apply_transition(
+    current: ApplyExecutionStatus, target: ApplyExecutionStatus
+) -> bool:
+    return target in LEGAL_APPLY_TRANSITIONS.get(current, frozenset())
 
 
 class ApplyTaskPayload(ProfileModel):
@@ -53,6 +96,9 @@ class ApplyTaskPayload(ProfileModel):
     job_title: str = Field(min_length=1, max_length=200)
     source_url: str = Field(max_length=2_000)
     action: ApplyAction = Field(default=ApplyAction.INITIATE_CONTACT, strict=False)
+    attempt: int = Field(default=1, ge=1, le=3)
+    lease_expires_at: datetime
+    reconciliation_required: bool = False
 
     @model_validator(mode="after")
     def validate_boss_url(self) -> "ApplyTaskPayload":
@@ -71,6 +117,9 @@ class ApplyTaskPayload(ProfileModel):
 class ExtensionHeartbeat(ProfileModel):
     extension_connected: Literal[True]
     execution_id: str | None = Field(default=None, min_length=8, max_length=100)
+    task_id: str | None = Field(default=None, min_length=8, max_length=100)
+    worker_tab_id: int | None = Field(default=None, ge=0)
+    task_state: str | None = Field(default=None, max_length=40)
 
 
 class ApplyResultReport(ProfileModel):
@@ -125,13 +174,16 @@ class BatchApplyExecutionItem(ProfileModel):
     contact_button_clicked: bool = False
     contact_success_detected: bool = False
     conversation_found: bool = False
+    attempt: int = Field(default=0, ge=0, le=3)
+    lease_expires_at: datetime | None = None
+    reconciliation_required: bool = False
 
 
 class BatchApplyExecution(ProfileModel):
     execution_id: str = Field(min_length=8, max_length=100)
     contact_plan_id: str | None = Field(default=None, min_length=8, max_length=100)
     screening_batch_id: str | None = Field(default=None, min_length=8, max_length=100)
-    items: list[BatchApplyExecutionItem] = Field(min_length=1, max_length=10)
+    items: list[BatchApplyExecutionItem] = Field(min_length=1, max_length=20)
     created_at: datetime = Field(default_factory=utc_now)
     finished_at: datetime | None = None
     cancelled: bool = False

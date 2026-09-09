@@ -26,6 +26,8 @@ from jobpilot.browser.extension_bridge import (
 )
 from jobpilot.browser.apply_channel import (
     HEARTBEAT_TIMEOUT_SECONDS,
+    TASK_LEASE_SECONDS,
+    MAX_TASK_ATTEMPTS,
     ApplyChannelDiagnostics,
     ApplyChannelError,
     ApplyTaskChannel,
@@ -38,6 +40,7 @@ from jobpilot.browser.site_capabilities import (
     SiteCapability,
 )
 from jobpilot.browser.site_router import require_discovery_mode, resolve_site_capability
+from jobpilot.browser.job_identity import canonical_job_key, canonicalize_job_url, safe_job_key
 
 __all__ = [
     "BossBrowserError", "BossBrowserManager", "BossExtractor", "BossLoginRequiredError",
@@ -48,7 +51,9 @@ __all__ = [
     "ContactMode", "ResumeSubmissionMode",
     "ApplyChannelError", "ApplyTaskChannel",
     "ApplyChannelDiagnostics", "HEARTBEAT_TIMEOUT_SECONDS",
+    "TASK_LEASE_SECONDS", "MAX_TASK_ATTEMPTS",
     "ExtensionInbox", "ExtensionJobSiteAdapter", "ExtensionPayload",
     "JobSiteAdapter", "PlaywrightJobSiteAdapter", "SiteCapability",
     "require_discovery_mode", "resolve_site_capability",
+    "canonical_job_key", "canonicalize_job_url", "safe_job_key",
 ]

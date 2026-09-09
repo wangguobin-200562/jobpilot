@@ -12,6 +12,7 @@ const APPLY_RESULT_ENDPOINT = "http://127.0.0.1:8765/v1/apply/results";
 const APPLY_HEARTBEAT_ENDPOINT = "http://127.0.0.1:8765/v1/apply/heartbeat";
 const DISCOVERY_ENDPOINT = "http://127.0.0.1:8765/v1/discovery";
 const CAPTURE_STATE_KEY = "jobpilot_capture_state";
+const RESULT_REPORT_RETRIES = 2;
 
 const connectionError = (error) => error?.name === "AbortError"
   ? { stage: "timeout", message: "连接 JobPilot 超时。" }
@@ -21,9 +22,21 @@ const authError = (payload) => payload?.status === "invalid_extension_origin"
   ? { stage: "invalid_origin", message: "Extension 来源未通过本地校验。" }
   : { stage: "invalid_token", message: "连接令牌已失效，JobPilot 可能已重启。" };
 
-const identity = (job) => job.source_url
-  ? `url:${job.source_url}`
-  : `name:${String(job.company || "").toLowerCase()}|${String(job.job_title || "").toLowerCase()}`;
+const canonicalUrl = (value) => {
+  if (!value) return null;
+  try {
+    const parsed = new URL(value);
+    if (parsed.hostname === "zhipin.com" || parsed.hostname.endsWith(".zhipin.com")) parsed.hostname = "www.zhipin.com";
+    parsed.search = "";
+    parsed.hash = "";
+    if (parsed.pathname !== "/") parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+    return parsed.toString();
+  } catch (_) { return value; }
+};
+
+const identity = (job) => job.canonical_job_key || (job.source_url
+  ? `url:${canonicalUrl(job.source_url).toLowerCase()}`
+  : `name:${String(job.company || "").toLowerCase()}|${String(job.job_title || "").toLowerCase()}`);
 
 const mergeJobs = (existing, incoming) => {
   const seen = new Set();
@@ -89,9 +102,17 @@ const probeBridge = async ({ resumeTasks = false } = {}) => {
     return { ok: false, status: "waiting_for_token", message };
   }
   try {
+    const currentState = await getApplyState();
+    const executing = ["opening", "executing"].includes(currentState.stage);
     const response = await bridgeRequest(APPLY_HEARTBEAT_ENDPOINT, token, {
       method: "POST",
-      body: JSON.stringify({ extension_connected: true, execution_id: null })
+      body: JSON.stringify({
+        extension_connected: true,
+        execution_id: currentState.execution_id || null,
+        task_id: executing ? currentState.task?.task_id || null : null,
+        worker_tab_id: currentState.worker_tab_id ?? null,
+        task_state: currentState.stage || null
+      })
     });
     const payload = await safeJson(response);
     if (response.status === 403) {
@@ -115,7 +136,7 @@ const probeBridge = async ({ resumeTasks = false } = {}) => {
       resumeTasks
       && state.auto_contact_enabled !== false
       && !state.running
-      && (payload.pending || 0) > 0
+      && ((payload.pending || 0) > 0 || (payload.processing || 0) > 0)
     ) {
       await setApplyState({ running: true, stage: "connecting", message: "已恢复连接，正在获取已确认任务。" });
       return runOneApplyStep();
@@ -238,18 +259,32 @@ const reconcileBossContact = async (tabId, task, buttonClicked) => {
 };
 
 const reportContactResult = async (token, taskId, result) => {
-  const response = await bridgeRequest(APPLY_RESULT_ENDPOINT, token, {
-    method: "POST",
-    body: JSON.stringify({
-      task_id: taskId,
-      status: result.status,
-      message: result.message,
-      contact_button_clicked: Boolean(result.contact_button_clicked),
-      contact_success_detected: Boolean(result.contact_success_detected),
-      conversation_found: Boolean(result.conversation_found)
-    })
-  });
-  if (!response.ok) throw new Error(`ResultReportHTTP${response.status}`);
+  const payload = {
+    task_id: taskId,
+    status: result.status,
+    message: result.message,
+    contact_button_clicked: Boolean(result.contact_button_clicked),
+    contact_success_detected: Boolean(result.contact_success_detected),
+    conversation_found: Boolean(result.conversation_found)
+  };
+  for (let attempt = 0; attempt <= RESULT_REPORT_RETRIES; attempt += 1) {
+    try {
+      const response = await bridgeRequest(APPLY_RESULT_ENDPOINT, token, {
+        method: "POST", body: JSON.stringify(payload)
+      });
+      if (response.ok) {
+        await setApplyState({ pending_report: null });
+        return;
+      }
+      if (response.status === 403 || response.status === 422) throw new Error(`ResultReportHTTP${response.status}`);
+    } catch (error) {
+      if (attempt === RESULT_REPORT_RETRIES) {
+        await setApplyState({ pending_report: payload, stage: "report_pending", message: "结果回传暂时中断，已保留并等待重试。" });
+        throw error;
+      }
+    }
+    await sleep(500 * (attempt + 1));
+  }
 };
 
 const runSafeHandoff = async (token, task) => {
@@ -279,7 +314,12 @@ const runBossContactTask = async (token, task) => {
     if (!tab) tab = await chrome.tabs.create({ url: task.source_url, active: false });
     await setApplyState({ worker_tab_id: tab.id });
     if (!await ensureBossAdapterReady(tab.id, 2)) throw new Error("BossAdapterNotReady");
-    await setApplyState({ stage: "executing", message: "正在发起已确认的初始沟通。" });
+    await setApplyState({
+      stage: "executing",
+      message: task.reconciliation_required
+        ? "正在先核对中断任务是否已建立会话。"
+        : "正在发起已确认的初始沟通。"
+    });
     const childPromise = waitForChildTab(tab.id);
     let result = null;
     try {
@@ -342,13 +382,18 @@ const runBossContactTask = async (token, task) => {
     }
     return safeResult.status;
   } catch (_) {
+    const interrupted = await getApplyState();
+    if (interrupted.pending_report) {
+      await setApplyState({ running: false, bridge_connected: false, stage: "report_pending", message: "结果已安全保留，等待 Bridge 恢复后回传。" });
+      return "report_pending";
+    }
     try {
       await reportContactResult(token, task.task_id, {
         status: "failed",
         message: "浏览器扩展连接或页面加载失败。"
       });
     } catch (_) {
-      // The server keeps the reserved task fail-safe; it is never reissued.
+      // The server lease will safely reconcile the reserved task.
     }
     await setApplyState({ stage: "failed", message: "岗位处理失败，请回到 JobPilot 检查状态。" });
     return "failed";
@@ -365,20 +410,22 @@ async function runOneApplyStep() {
   }
 
   if (["opening", "executing"].includes(state.stage) && state.task?.task_id) {
+    const leaseExpires = Date.parse(state.task.lease_expires_at || "");
+    if (Number.isFinite(leaseExpires) && Date.now() < leaseExpires) {
+      await setApplyState({ stage: "recovering_wait", message: "检测到执行中断，正在等待安全租约后核对。" });
+      await scheduleNextStep(Math.min(10000, Math.max(1000, leaseExpires - Date.now())));
+      return { ok: true, message: "等待任务租约后安全恢复。" };
+    }
+    await setApplyState({ stage: "recovering", task: null, message: "正在重新领取并核对中断任务。" });
+  }
+
+  if (state.pending_report) {
     try {
-      await reportContactResult(token, state.task.task_id, {
-        status: "manual_required",
-        message: "Extension 执行过程被中断，请人工确认该岗位当前状态。"
-      });
-      await setApplyState({
-        stage: "manual_required",
-        message: "上次执行被中断，该岗位需要人工确认。"
-      });
-      await scheduleNextStep(5000);
-      return { ok: true, message: "中断任务已转为人工确认。" };
+      await reportContactResult(token, state.pending_report.task_id, state.pending_report);
+      await setApplyState({ stage: "waiting", task: null, message: "上次结果已完成回传。" });
     } catch (_) {
-      await setApplyState({ running: false, stage: "bridge_unavailable", message: "JobPilot Bridge 不可用。" });
-      return { ok: false, message: "JobPilot Bridge 不可用。" };
+      await scheduleNextStep(5000);
+      return { ok: false, message: "结果回传仍在等待 Bridge 恢复。" };
     }
   }
 
@@ -388,7 +435,10 @@ async function runOneApplyStep() {
       method: "POST",
       body: JSON.stringify({
         extension_connected: true,
-        execution_id: null
+        execution_id: state.execution_id || null,
+        task_id: state.task?.task_id || null,
+        worker_tab_id: state.worker_tab_id ?? null,
+        task_state: state.stage || null
       })
     });
     const heartbeatPayload = await safeJson(heartbeat);
@@ -439,7 +489,10 @@ async function runOneApplyStep() {
         company: task.company,
         job_title: task.job_title,
         source_url: task.source_url,
-        action: task.action
+        action: task.action,
+        attempt: task.attempt,
+        lease_expires_at: task.lease_expires_at,
+        reconciliation_required: Boolean(task.reconciliation_required)
       }
     });
     await scheduleNextStep(35000);
@@ -504,10 +557,28 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     chrome.storage.local.get({ [QUEUE_KEY]: [], [CAPTURE_STATE_KEY]: { enabled: true, count: 0 } }, async (stored) => {
       const incoming = Array.isArray(message.jobs) ? message.jobs.slice(0, 20) : [];
       const jobs = mergeJobs(stored[QUEUE_KEY], incoming);
-      const captureState = { ...stored[CAPTURE_STATE_KEY], count: jobs.length };
+      const captureState = {
+        ...stored[CAPTURE_STATE_KEY],
+        count: jobs.length,
+        status: "captured",
+        last_event_id: incoming[0]?.capture_event_id || null,
+        updated_at: new Date().toISOString()
+      };
       await chrome.storage.local.set({ [QUEUE_KEY]: jobs, [CAPTURE_STATE_KEY]: captureState });
       await syncDiscoveredJobs(jobs);
       sendResponse({ ok: true, jobs });
+    });
+    return true;
+  }
+  if (message?.type === "JOBPILOT_CAPTURE_STATUS") {
+    chrome.storage.local.get({ [CAPTURE_STATE_KEY]: { enabled: false, count: 0 } }, (stored) => {
+      const state = {
+        ...stored[CAPTURE_STATE_KEY],
+        status: message.status,
+        failure_reason: message.reason || null,
+        updated_at: new Date().toISOString()
+      };
+      chrome.storage.local.set({ [CAPTURE_STATE_KEY]: state }, () => sendResponse({ ok: true, state }));
     });
     return true;
   }
@@ -517,8 +588,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   }
   if (message?.type === "JOBPILOT_SET_CAPTURE") {
     chrome.storage.local.get({ [CAPTURE_STATE_KEY]: { enabled: false, count: 0 } }, (stored) => {
-      const state = { ...stored[CAPTURE_STATE_KEY], enabled: Boolean(message.enabled) };
-      chrome.storage.local.set({ [CAPTURE_STATE_KEY]: state }, () => sendResponse({ ok: true, state }));
+      const startingNewRound = Boolean(message.enabled) && !stored[CAPTURE_STATE_KEY].enabled;
+      const state = {
+        ...stored[CAPTURE_STATE_KEY],
+        enabled: Boolean(message.enabled),
+        count: startingNewRound ? 0 : stored[CAPTURE_STATE_KEY].count,
+        capture_session_id: startingNewRound ? crypto.randomUUID() : stored[CAPTURE_STATE_KEY].capture_session_id,
+        status: message.enabled ? "capture_pending" : "paused"
+      };
+      const values = { [CAPTURE_STATE_KEY]: state };
+      if (startingNewRound) values[QUEUE_KEY] = [];
+      chrome.storage.local.set(values, () => sendResponse({ ok: true, state }));
     });
     return true;
   }
@@ -575,4 +655,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     chrome.storage.local.set({ [QUEUE_KEY]: jobs }, () => sendResponse({ ok: true, jobs }));
   });
   return true;
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  getApplyState().then(async (state) => {
+    if (state.worker_tab_id !== tabId) return;
+    await setApplyState({ worker_tab_id: null, stage: state.running ? "recovering" : state.stage, message: state.running ? "工作标签页已关闭，将自动恢复未完成任务。" : state.message });
+    if (state.running) await scheduleNextStep(1000);
+  });
 });

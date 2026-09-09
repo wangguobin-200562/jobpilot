@@ -2,9 +2,10 @@
 
 from datetime import datetime, timezone
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from jobpilot.models import BatchJobInput, ProfileModel
+from jobpilot.browser.job_identity import canonical_job_key, canonicalize_job_url
 
 
 class JobDiscoveryItem(ProfileModel):
@@ -16,6 +17,16 @@ class JobDiscoveryItem(ProfileModel):
     source_url: str = Field(min_length=1, max_length=2_048)
     jd_text: str = Field(min_length=1, max_length=100_000)
     discovered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    capture_event_id: str | None = Field(default=None, min_length=8, max_length=100)
+    canonical_job_key: str | None = Field(default=None, min_length=5, max_length=2_100)
+
+    @model_validator(mode="after")
+    def normalize_identity(self) -> "JobDiscoveryItem":
+        self.source_url = canonicalize_job_url(self.source_url) or self.source_url
+        self.canonical_job_key = canonical_job_key(
+            self.source_url, self.company, self.job_title
+        )
+        return self
 
 
 class JobDiscoveryFailure(ProfileModel):

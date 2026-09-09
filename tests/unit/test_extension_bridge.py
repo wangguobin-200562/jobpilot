@@ -225,7 +225,8 @@ def test_apply_channel_requires_local_token_and_extension_origin() -> None:
         assert status == 200
         assert payload["status"] == "task"
         assert set(payload["task"]) == {
-            "task_id", "application_id", "company", "job_title", "source_url", "action"
+            "task_id", "application_id", "company", "job_title", "source_url", "action",
+            "attempt", "lease_expires_at", "reconciliation_required",
         }
 
 

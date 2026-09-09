@@ -51,6 +51,12 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName === "local" && changes.jobpilot_apply_runtime_state?.newValue?.message) {
     setStatus(changes.jobpilot_apply_runtime_state.newValue.message);
   }
+  if (areaName === "local" && changes.jobpilot_capture_state?.newValue) {
+    const capture = changes.jobpilot_capture_state.newValue;
+    if (capture.status === "capture_pending") setStatus("正在等待当前岗位详情稳定。");
+    if (capture.status === "capture_failed") setStatus(`当前岗位采集失败（${capture.failure_reason || "页面未就绪"}）。`);
+    if (capture.status === "captured") setStatus(`采集完成，当前批次已读取 ${capture.count || 0} 个岗位。`);
+  }
 });
 
 document.getElementById("capture").addEventListener("click", async () => {
@@ -65,11 +71,10 @@ document.getElementById("capture").addEventListener("click", async () => {
     return;
   }
   try {
-    const queued = await runtimeMessage({ type: "JOBPILOT_GET_JOBS" });
-    await runtimeMessage({ type: "JOBPILOT_SET_CAPTURE", enabled: true });
-    const page = await tabMessage(tab.id, { type: "JOBPILOT_CAPTURE_START", count: queued.jobs?.length || 0 });
+    const capture = await runtimeMessage({ type: "JOBPILOT_SET_CAPTURE", enabled: true });
+    const page = await tabMessage(tab.id, { type: "JOBPILOT_CAPTURE_START", count: capture.state?.count || 0 });
     if (!page?.ok) throw new Error("ContentScriptUnavailable");
-    setStatus(`连续采集已开启。已读取 ${queued.jobs?.length || 0} 个岗位。`);
+    setStatus(`连续采集已开启。已读取 ${capture.state?.count || 0} 个岗位。`);
   } catch (_) {
     setStatus("当前页面暂时无法读取，请刷新页面后重试。");
   }

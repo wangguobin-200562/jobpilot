@@ -44,6 +44,8 @@ from jobpilot.models.apply_execution import (
     BatchApplyExecutionItem,
     ExtensionHeartbeat,
     TERMINAL_APPLY_STATUSES,
+    LEGAL_APPLY_TRANSITIONS,
+    is_legal_apply_transition,
 )
 from jobpilot.models.candidate_profile import (
     CandidateProfile,
@@ -170,4 +172,6 @@ __all__ = [
     "STATUS_LABELS",
     "TopMatchingJob",
     "TERMINAL_APPLY_STATUSES",
+    "LEGAL_APPLY_TRANSITIONS",
+    "is_legal_apply_transition",
 ]

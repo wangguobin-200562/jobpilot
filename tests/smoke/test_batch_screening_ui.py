@@ -218,7 +218,9 @@ def test_rerun_and_same_batch_submit_do_not_repeat_provider_calls(
     _button(app, "开始筛选").click().run(timeout=10)
 
     assert first_result.metrics.flash_provider_calls == 3
-    assert app.session_state["batch_screening_result"].metrics.cache_hits >= 3
+    repeated = app.session_state["batch_screening_result"]
+    assert repeated.screening_batch_id == first_result.screening_batch_id
+    assert repeated.metrics.flash_provider_calls == 3
 
 
 def test_detailed_analysis_is_requested_from_one_result_card(tmp_path, monkeypatch) -> None:

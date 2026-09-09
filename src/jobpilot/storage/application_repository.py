@@ -19,6 +19,7 @@ from jobpilot.models import (
     MatchResult,
     ResumeOptimizationResult,
 )
+from jobpilot.browser.job_identity import canonicalize_job_url
 from jobpilot.storage.database import DatabaseError, connect, initialize_database
 
 
@@ -158,7 +159,7 @@ class ApplicationRepository:
             optimization_result.model_dump_json() if optimization_result else None,
             notes,
             source.strip() if source and source.strip() else None,
-            source_url.strip() if source_url and source_url.strip() else None,
+            canonicalize_job_url(source_url),
             deferred_until.isoformat() if deferred_until else None,
             applied_at,
             contacted_at,

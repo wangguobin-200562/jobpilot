@@ -272,6 +272,7 @@ class FastScreeningPipeline:
         mode: ScreeningMode = ScreeningMode.QUICK,
         explicitly_deep_indices: set[int] | None = None,
         progress_callback: ProgressCallback | None = None,
+        screening_batch_id: str | None = None,
     ) -> FastScreeningPipelineResult | BatchScreeningResult:
         if candidate is None or not resume_fingerprint:
             raise CandidateProfileRequiredError("请先完成简历分析，再进行批量岗位筛选。")
@@ -564,4 +565,7 @@ class FastScreeningPipeline:
                 time_to_first_result_seconds=max(0.0, first_result_at - total_started),
             ),
         )
-        return FastScreeningPipelineResult(items=sorted_items, metrics=metrics)
+        result_values = {"items": sorted_items, "metrics": metrics}
+        if screening_batch_id is not None:
+            result_values["screening_batch_id"] = screening_batch_id
+        return FastScreeningPipelineResult(**result_values)

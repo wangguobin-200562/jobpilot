@@ -176,7 +176,7 @@ def test_cancel_stops_remaining_pending_work() -> None:
 
     execution = app.session_state["batch_apply_execution"]
     assert execution.cancelled is True
-    assert all(item.status is ApplyExecutionStatus.SKIPPED for item in execution.items)
+    assert all(item.status is ApplyExecutionStatus.CANCELLED for item in execution.items)
 
 
 def test_heartbeat_diagnostics_are_collapsed_and_token_is_not_rendered() -> None:

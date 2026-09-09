@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from uuid import uuid4
 
 import streamlit as st
 
@@ -448,7 +449,7 @@ def render_batch_screening(
             persist_state="session",
         )
     raw_input = st.session_state.get("batch_job_input", "")
-    sync_batch_input_state(raw_input)
+    input_fingerprint = sync_batch_input_state(raw_input)
     screening_mode = ScreeningMode.QUICK
     explicitly_deep_indices: set[int] = set()
 
@@ -471,7 +472,22 @@ def render_batch_screening(
         st.info("AI 分析尚未配置，请完成 DeepSeek API Key 配置后重试。")
 
     result = st.session_state.get("batch_screening_result")
+    request_key = (
+        f"{resume_fingerprint}:{input_fingerprint}:quick"
+        if resume_fingerprint and input_fingerprint
+        else None
+    )
+    if (
+        requested
+        and result is not None
+        and request_key is not None
+        and st.session_state.get("screening_request_key") == request_key
+    ):
+        requested = False
+        st.info("当前岗位批次已经完成筛选，已复用现有结果。")
     if requested:
+        screening_batch_id = f"screening-{uuid4().hex}"
+        st.session_state.screening_in_progress = True
         try:
             inputs = parse_batch_job_input(raw_input)
             repository = repository_factory()
@@ -553,17 +569,21 @@ def render_batch_screening(
                     mode=ScreeningMode.QUICK,
                     explicitly_deep_indices=explicitly_deep_indices,
                     progress_callback=update_fast_progress,
+                    screening_batch_id=screening_batch_id,
                 )
             progress.progress(1.0, text=f"已完成 {len(inputs)} 个岗位的批量处理")
             st.session_state.batch_screening_mode_used = ScreeningMode.QUICK.value
             mark_discovery_items_screened(inputs)
             store_batch_screening_result(result, None)
+            st.session_state.screening_request_key = request_key
         except BatchInputError as exc:
             store_batch_screening_result(None, str(exc))
             result = None
         except ApplicationRepositoryError:
             store_batch_screening_result(None, "本地岗位数据暂时无法读取，请稍后重试。")
             result = None
+        finally:
+            st.session_state.screening_in_progress = False
 
     error = st.session_state.get("batch_input_error")
     if error:

@@ -197,8 +197,22 @@
     };
   };
 
+  const canonicalUrl = (value) => {
+    if (!value) return null;
+    try {
+      const parsed = new URL(value, "https://www.zhipin.com/");
+      if (parsed.hostname === "zhipin.com" || parsed.hostname.endsWith(".zhipin.com")) {
+        parsed.hostname = "www.zhipin.com";
+      }
+      parsed.search = "";
+      parsed.hash = "";
+      if (parsed.pathname !== "/") parsed.pathname = parsed.pathname.replace(/\/+$/, "");
+      return parsed.toString();
+    } catch (_) { return value; }
+  };
+
   const identity = (job) => {
-    if (job.source_url) return `url:${job.source_url}`;
+    if (job.source_url) return `url:${canonicalUrl(job.source_url).toLowerCase()}`;
     return `name:${String(job.company || "").toLowerCase()}|${String(job.job_title || "").toLowerCase()}`;
   };
 
@@ -269,6 +283,8 @@
   let lastStableSignature = null;
   let stableChecks = 0;
   let heartbeatTimer = null;
+  let captureStartedAt = null;
+  let captureAttempts = 0;
 
   // Reloading an unpacked MV3 extension invalidates content scripts that are
   // already running in open tabs. Guard runtime messaging so those stale
@@ -314,29 +330,47 @@
     return { job, identity: identity(job), signature: `${identity(job)}:${job.jd_text.length}` };
   };
 
+  const reportCaptureState = (status, reason = null) => sendRuntimeMessage({
+    type: "JOBPILOT_CAPTURE_STATUS", status, reason
+  });
+
   const tryContinuousCapture = () => {
     captureTimer = null;
     if (!captureEnabled) return;
     let current = null;
-    try { current = currentSignature(); } catch (_) { return; }
-    if (!current) return;
+    try { current = currentSignature(); } catch (_) {
+      reportCaptureState("capture_failed", "extraction_error");
+    }
+    if (!current) {
+      captureAttempts += 1;
+      reportCaptureState("capture_pending", "detail_not_ready");
+      if (captureAttempts < 20) captureTimer = setTimeout(tryContinuousCapture, 300);
+      else reportCaptureState("capture_failed", "detail_timeout");
+      return;
+    }
     if (current.signature !== lastStableSignature) {
       lastStableSignature = current.signature;
       stableChecks = 1;
-      captureTimer = setTimeout(tryContinuousCapture, 500);
+      reportCaptureState("capture_pending", "stabilizing");
+      captureTimer = setTimeout(tryContinuousCapture, 300);
       return;
     }
     stableChecks += 1;
     if (stableChecks < 2 || current.identity === lastCaptureIdentity) return;
     lastCaptureIdentity = current.identity;
+    current.job.source_url = canonicalUrl(current.job.source_url);
+    current.job.canonical_job_key = current.identity;
+    current.job.capture_event_id = crypto.randomUUID();
+    current.job.discovered_at = new Date().toISOString();
     sendRuntimeMessage({ type: "JOBPILOT_CAPTURED_JOBS", jobs: [current.job] }, (response) => {
       updateCaptureBadge(response?.jobs?.length || 0);
+      reportCaptureState(response?.ok ? "captured" : "capture_failed", response?.ok ? null : "storage_error");
     });
   };
 
   const scheduleCapture = () => {
     if (!captureEnabled || captureTimer) return;
-    captureTimer = setTimeout(tryContinuousCapture, 700);
+    captureTimer = setTimeout(tryContinuousCapture, 250);
   };
 
   if (typeof MutationObserver !== "undefined" && typeof chrome !== "undefined" && chrome.storage?.local) {
@@ -360,6 +394,8 @@
         captureEnabled = true;
         lastStableSignature = null;
         stableChecks = 0;
+        captureAttempts = 0;
+        captureStartedAt = new Date().toISOString();
         updateCaptureBadge(message.count || 0);
         scheduleCapture();
         sendResponse({ ok: true });

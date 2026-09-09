@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from hashlib import sha256
+import logging
 from uuid import uuid4
 
 from jobpilot.models import ApplicationStatus, BatchApplyPlan, JobApplication, JobProfile
@@ -16,9 +18,17 @@ from jobpilot.models.apply_execution import (
 )
 from jobpilot.services.batch_apply_service import EXCLUDED_APPLICATION_STATUSES
 from jobpilot.services.batch_apply_service import infer_job_source, valid_source_url
+from jobpilot.browser.job_identity import canonical_job_key, canonicalize_job_url
+from jobpilot.browser.job_identity import safe_job_key
 
 
-MAX_EXECUTION_JOBS = 10
+MAX_EXECUTION_JOBS = 20
+logger = logging.getLogger(__name__)
+
+
+def _stable_id(prefix: str, *values: str) -> str:
+    digest = sha256("\0".join(values).encode("utf-8")).hexdigest()
+    return f"{prefix}-{digest}"
 
 
 def create_safe_handoff_execution() -> BatchApplyExecution:
@@ -52,9 +62,9 @@ class BatchApplyExecutionService:
             for application in applications:
                 if application.id == item.application_id:
                     return application
-        url = (item.source_url or "").strip().casefold()
+        url = canonicalize_job_url(item.source_url)
         for application in applications:
-            if url and (application.source_url or "").strip().casefold() == url:
+            if url and canonicalize_job_url(application.source_url) == url:
                 return application
             if (
                 application.company.strip().casefold() == item.company.strip().casefold()
@@ -77,12 +87,8 @@ class BatchApplyExecutionService:
                 existing is not None
                 and existing.status in EXCLUDED_APPLICATION_STATUSES
             )
-            source_url = item.source_url or ""
-            identity = (
-                f"url:{source_url.strip().casefold()}"
-                if source_url
-                else f"name:{item.company.strip().casefold()}|{item.job_title.strip().casefold()}"
-            )
+            source_url = canonicalize_job_url(item.source_url) or item.source_url or ""
+            identity = canonical_job_key(source_url, item.company, item.job_title)
             duplicate = identity in seen
             seen.add(identity)
             unsupported = (
@@ -103,7 +109,7 @@ class BatchApplyExecutionService:
                 message = "岗位链接无效或当前来源不支持初始沟通。"
             execution_items.append(
                 BatchApplyExecutionItem(
-                    task_id=f"apply-{uuid4().hex}",
+                    task_id=_stable_id("apply", plan.contact_plan_id, identity),
                     application_id=existing.id if existing else item.application_id,
                     company=item.company,
                     job_title=item.job_title,
@@ -120,7 +126,7 @@ class BatchApplyExecutionService:
                 )
             )
         execution = BatchApplyExecution(
-            execution_id=f"execution-{uuid4().hex}",
+            execution_id=_stable_id("execution", plan.contact_plan_id),
             contact_plan_id=plan.contact_plan_id,
             screening_batch_id=plan.screening_batch_id,
             items=execution_items,
@@ -170,9 +176,32 @@ class BatchApplyExecutionService:
                 else:
                     continue
             else:
-                updated = self.repository.update_status(
-                    item.application_id, ApplicationStatus.CONTACTED
+                current = next(
+                    (
+                        application
+                        for application in self._applications()
+                        if application.id == item.application_id
+                    ),
+                    None,
+                )
+                updated = (
+                    current
+                    if current is not None
+                    and current.status is ApplicationStatus.CONTACTED
+                    else self.repository.update_status(
+                        item.application_id, ApplicationStatus.CONTACTED
+                    )
                 )
             if updated is not None and updated.status is ApplicationStatus.CONTACTED:
                 synced.add(item.task_id)
+                logger.info(
+                    "apply_event=repository_sync batch_id=%s plan_id=%s execution_id=%s job_key=%s task_state=%s attempt=%s reconciliation_result=%s repository_sync_result=contacted",
+                    execution.screening_batch_id,
+                    execution.contact_plan_id,
+                    execution.execution_id,
+                    safe_job_key(canonical_job_key(item.source_url, item.company, item.job_title)),
+                    item.status.value,
+                    item.attempt,
+                    "confirmed",
+                )
         return synced

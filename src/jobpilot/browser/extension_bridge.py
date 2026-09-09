@@ -20,6 +20,7 @@ from pydantic import Field, model_validator
 
 from jobpilot.browser.apply_channel import ApplyTaskChannel
 from jobpilot.browser.models import JobDiscoveryItem
+from jobpilot.browser.job_identity import canonical_job_key
 from jobpilot.models import ApplyResultReport, ExtensionHeartbeat, ProfileModel
 
 
@@ -46,8 +47,7 @@ class ExtensionPayload(ProfileModel):
     @model_validator(mode="after")
     def validate_boss_jobs(self) -> "ExtensionPayload":
         unique: list[JobDiscoveryItem] = []
-        seen_urls: set[str] = set()
-        seen_identity: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         for job in self.jobs:
             parsed = urlparse(job.source_url)
             if job.source != self.site:
@@ -58,15 +58,10 @@ class ExtensionPayload(ProfileModel):
                 or not parsed.hostname.endswith("zhipin.com")
             ):
                 raise ValueError("BOSS job URLs must use the zhipin.com HTTPS origin")
-            identity = (
-                (job.company or "").strip().casefold(),
-                (job.job_title or "").strip().casefold(),
-            )
-            if job.source_url in seen_urls or (all(identity) and identity in seen_identity):
+            identity = canonical_job_key(job.source_url, job.company, job.job_title)
+            if identity in seen:
                 continue
-            seen_urls.add(job.source_url)
-            if all(identity):
-                seen_identity.add(identity)
+            seen.add(identity)
             unique.append(job)
         self.jobs = unique
         return self
